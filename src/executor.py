@@ -1,3 +1,7 @@
+import itertools
+import re
+from datetime import datetime, date
+
 from lark import Transformer
 
 from src import exceptions
@@ -33,6 +37,60 @@ class SQLExecutor(Transformer):
         """
 
         self.transform(tree)
+
+    @classmethod
+    def parse_value(cls, value):
+        """
+        Parse a SQL input value and return the parsed result
+        : SQL input -> Python value
+        """
+
+        # null
+        if value.lower() == 'null':
+            parsed_type = 'null'
+            parsed_value = None
+
+        else:
+            try:
+                # int
+                parsed_type = 'int'
+                parsed_value = int(value)
+            except ValueError:
+                # date
+                if re.match(r'^\d{4}-\d{2}-\d{2}$', value):
+                    parsed_type = 'date'
+                    parsed_value = datetime.strptime(value, '%Y-%m-%d').date()
+
+                # char
+                else:
+                    parsed_type = 'char'
+                    parsed_value = eval(value)
+
+        return parsed_type, parsed_value
+
+    @classmethod
+    def serialize_value(cls, value):
+        """
+        Serialize a Python value (When storing in the database)
+        : Python value -> The value that is stored in the database
+        """
+
+        if isinstance(value, date):
+            return value.strftime('%Y-%m-%d')
+        else:
+            return value
+
+    @classmethod
+    def deserialize_value(cls, value, column_type):
+        """
+        Deserialize a database value (When fetching from the database)
+        : The value that is stored in the database -> Python value
+        """
+
+        if value is not None and column_type == 'date':
+            return datetime.strptime(value, '%Y-%m-%d').date()
+        else:
+            return value
 
     def create_table_query(self, items):
         # Extract the table name
@@ -252,13 +310,157 @@ class SQLExecutor(Transformer):
         self.explain_query(items)
 
     def insert_query(self, items):
-        pass
+        """
+        For project 1-3, here we assume only simple cases as follows.
+        - The values in all columns are specified.
+        - Each specified values matches the corresponding column type.
+        - The value is not null if the corresponding column does not allow null.
+        """
+
+        # Extract the table name
+        table_name = items[2].children[0].lower()
+
+        # Error: When the table does not exist
+        existing_table_name_set = set(self.db_manager.get_table_names())
+        if table_name not in existing_table_name_set:
+            raise exceptions.NoSuchTable
+
+        # Load the table and its columns
+        table = self.db_manager.get_table(table_name)
+        column_list = table['columns']
+
+        # The column names that specified what value to insert
+        if not items[3]:
+            column_name_list = [column['name'] for column in column_list]  # Imply all columns
+        else:
+            column_name_list = [column_name.children[0].lower() for column_name in items[4].find_data('column_name')]
+
+        # The column values that is specified
+        column_value_list = [column_value.children[0] for column_value in items[8].find_data('column_value')]
+
+        # Construct the record to insert
+        record = {}
+        for column in column_list:
+            column_name = column['name']
+            column_type = column['type']
+
+            column_value = column_value_list[column_name_list.index(column_name)]
+
+            # Parse the column value
+            parsed_type, parsed_value = self.parse_value(column_value)
+
+            # Truncate the `char(n)` value
+            if parsed_type == 'char':
+                n = int(column_type[5:-1])
+                parsed_value = parsed_value[:n]
+
+            record[column_name] = self.serialize_value(parsed_value)
+
+        # Insert the record into the table
+        table['records'].append(record)
+        self.db_manager.set_table(table_name, table)
+
+        print(f'{PROMPT_TEXT}> The row is inserted')
 
     def delete_query(self, items):
         pass
 
     def select_query(self, items):
-        pass
+        """
+        For project 1-3, here we assume only `select * from table_name` case.
+        (However, I implemented more than the requirement with project 1-3 in mind.)
+        """
+
+        # Load the table names
+        existing_table_name_set = set(self.db_manager.get_table_names())
+
+        # The set of table names, for detecting conflict in the table names
+        table_name_set = set()
+
+        # Prepare the records for each table
+        list_of_record_list = []
+        column_expr_list = []
+        for table_name_as in items[3].find_data('table_expr'):
+            # Extract the table name/alias
+            table_name = table_name_as.children[0].children[0].lower()
+            table_alias = table_name_as.children[2].children[0].lower() if table_name_as.children[2] else None
+
+            # Error: When the table does not exist
+            if table_name not in existing_table_name_set:
+                raise exceptions.SelectTableExistenceError(table_name)
+
+            # Load the table and its columns/records
+            table = self.db_manager.get_table(table_name)
+            column_list = table['columns']
+            record_list = table['records']
+
+            # Replace the table name with the table alias
+            if table_alias:
+                table_name = table_alias
+
+            # Error: When the table names conflict
+            if table_name in table_name_set:
+                raise exceptions.EtcError
+
+            table_name_set.add(table_name)
+
+            # Preprocess the records (for identifying each column and deserializing the values into comparable values)
+            preprocessed_record_list = list(map(lambda record: {
+                f'{table_name}.{column["name"]}': self.deserialize_value(record[column['name']], column['type'])
+                for column in column_list
+            }, record_list))
+            list_of_record_list.append(preprocessed_record_list)
+
+            column_expr_list.extend([f'{table_name}.{column["name"]}' for column in column_list])
+
+        # Merge all records into a table (Cartesian Product)
+        merged_record_list = []
+        for comb in itertools.product(*list_of_record_list):
+            merged_record = {}
+            for record in comb:
+                merged_record.update(record)
+            merged_record_list.append(merged_record)
+
+        # Select the columns to display
+        selected_column_expr_list = column_expr_list  # Select all columns (*)
+
+        def get_display(value):
+            """
+            Get the display string from a Python value
+            """
+
+            if value is None:
+                return 'null'
+            elif isinstance(value, int):
+                return str(value)
+            elif isinstance(value, str):
+                return value
+            else:
+                return value.strftime('%Y-%m-%d')
+
+        # Set the width of each column (based on the longest value for each column)
+        width_list = [len(column_expr) + self.WIDTH_PADDING for column_expr in selected_column_expr_list]
+        for record in merged_record_list:
+            for idx, column_expr in enumerate(selected_column_expr_list):
+                width_list[idx] = max(width_list[idx], len(get_display(record[column_expr])) + self.WIDTH_PADDING)
+
+        # Print the result
+        dividing_line = '+' + '+'.join(['-' * width for width in width_list]) + '+'
+        print(dividing_line)
+        print('|' + '|'.join([
+            f'{f" {column_expr}":<{width_list[idx]}}'
+            for idx, column_expr in enumerate(selected_column_expr_list)
+        ]) + '|')
+        print(dividing_line)
+        if merged_record_list:
+            print('\n'.join([
+                '|' + '|'.join([
+                    f'{f" {get_display(record[column_expr])}":<{width_list[idx]}}'
+                    for idx, column_expr in enumerate(selected_column_expr_list)
+                ]) + '|'
+                for record in merged_record_list
+            ]))
+            print(dividing_line)
 
     def show_tables_query(self, items):
         # Load the table names
