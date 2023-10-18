@@ -142,15 +142,19 @@ class SQLExecutor(Transformer):
             primary_key_definition = primary_key_definition_list[0]
             column_name_list = primary_key_definition['column_name_list']
 
+            # Error: When some column does not exist
+            non_existing_column_name = next(filter(
+                lambda column_name: column_name not in column_name_to_idx,
+                column_name_list
+            ), None)
+            if non_existing_column_name:
+                raise exceptions.NonExistingColumnDefError(non_existing_column_name)
+
             # Error: When there are duplicates in the column names (within the primary key definition)
             if len(set(column_name_list)) < len(column_name_list):
-                raise exceptions.DuplicateColumnDefError
+                raise exceptions.EtcError
 
             for column_name in column_name_list:
-                # Error: When the column does not exist
-                if column_name not in column_name_to_idx:
-                    raise exceptions.NonExistingColumnDefError(column_name)
-
                 column_list[column_name_to_idx[column_name]].update({'null': False, 'primary': True})
 
         # Extract the foreign key definitions
@@ -170,18 +174,15 @@ class SQLExecutor(Transformer):
             ref_table_name = foreign_key_definition['ref_table_name']
             ref_column_name_list = foreign_key_definition['ref_column_name_list']
 
-            # Error: When there are duplicates in the column names (within the foreign key definition)
-            if (
-                len(set(column_name_list)) < len(column_name_list) or
-                len(set(ref_column_name_list)) < len(ref_column_name_list)
-            ):
-                raise exceptions.DuplicateColumnDefError
+            # Error: When some column does not exist
+            non_existing_column_name = next(filter(
+                lambda column_name: column_name not in column_name_to_idx,
+                column_name_list
+            ), None)
+            if non_existing_column_name:
+                raise exceptions.NonExistingColumnDefError(non_existing_column_name)
 
-            # Error: When the number of the columns is different from the number of the referred columns
-            if len(column_name_list) != len(ref_column_name_list):
-                raise exceptions.EtcError
-
-            # Error: When the foreign key refers to non-existing table (including self-referencing)
+            # Error: When the referred table does not exist (including self-referencing)
             if ref_table_name not in existing_table_name_set:
                 raise exceptions.ReferenceTableExistenceError
 
@@ -195,15 +196,26 @@ class SQLExecutor(Transformer):
                 if column['primary']
             }
 
+            # Error: When some referred column does not exist
+            non_existing_ref_column_name = next(filter(
+                lambda ref_column_name: ref_column_name not in referred_table_column_dict,
+                ref_column_name_list
+            ), None)
+            if non_existing_ref_column_name:
+                raise exceptions.NonExistingColumnDefError(non_existing_ref_column_name)
+
+            # Error: When there are duplicates in the column names (within the foreign key definition)
+            if (
+                len(set(column_name_list)) < len(column_name_list) or
+                len(set(ref_column_name_list)) < len(ref_column_name_list)
+            ):
+                raise exceptions.EtcError
+
+            # Error: When the number of the columns is different from the number of the referred columns
+            if len(column_name_list) != len(ref_column_name_list):
+                raise exceptions.EtcError
+
             for column_name, ref_column_name in zip(column_name_list, ref_column_name_list):
-                # Error: When the column does not exist
-                if column_name not in column_name_to_idx:
-                    raise exceptions.NonExistingColumnDefError(column_name)
-
-                # Error: When the referred column does not exist
-                if ref_column_name not in referred_table_column_dict:
-                    raise exceptions.ReferenceColumnExistenceError
-
                 # Error: When the referred column is not primary key
                 if ref_column_name not in referred_table_primary_key_set:
                     raise exceptions.ReferenceNonPrimaryKeyError
