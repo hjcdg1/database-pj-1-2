@@ -197,12 +197,11 @@ class SQLExecutor(Transformer):
             }
 
             # Error: When some referred column does not exist
-            non_existing_ref_column_name = next(filter(
+            if any(map(
                 lambda ref_column_name: ref_column_name not in referred_table_column_dict,
                 ref_column_name_list
-            ), None)
-            if non_existing_ref_column_name:
-                raise exceptions.NonExistingColumnDefError(non_existing_ref_column_name)
+            )):
+                raise exceptions.ReferenceColumnExistenceError
 
             # Error: When there are duplicates in the column names (within the foreign key definition)
             if (
